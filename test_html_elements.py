@@ -1,30 +1,43 @@
+
+import os
+import unittest
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.firefox.options import Options
-import unittest
+
 
 class TestH5Tag(unittest.TestCase):
     def setUp(self):
-        # Setup Firefox options
+        # Configure Firefox to run without opening a visible browser window.
         firefox_options = Options()
-        firefox_options.add_argument("--headless")  # Ensures the browser window does not open
-        firefox_options.add_argument("--no-sandbox")
-        firefox_options.add_argument("--disable-dev-shm-usage")
+        firefox_options.add_argument("--headless")
+
         self.driver = webdriver.Firefox(options=firefox_options)
 
     def test_h5_tag_content(self):
         driver = self.driver
-        driver.get("http://10.48.229.158")  # Replace with your target website
-        
-        # Locate the <h5> tag and get its text
+
+        # Use the Jenkins TARGET_URL environment variable, if provided.
+        target_url = os.environ.get(
+            "TARGET_URL",
+            "http://10.48.229.171"
+        )
+        driver.get(target_url)
+
+        # Find the h5 element and check its text.
         h5_text = driver.find_element(By.TAG_NAME, "h5").text
-        
-        # Assert that the text of the <h5> tag is "Lab 3-7 Works!"
-        self.assertEqual("Lab 3-7 Works!", h5_text, "The <h5> tag does not contain the text 'Lab 3-7 Works!'")
+
+        self.assertEqual(
+            "Lab 3-7 Works!",
+            h5_text,
+            "The h5 tag does not contain the expected text."
+        )
 
     def tearDown(self):
-        self.driver.quit()
+        if hasattr(self, "driver"):
+            self.driver.quit()
+
 
 if __name__ == "__main__":
     unittest.main()
