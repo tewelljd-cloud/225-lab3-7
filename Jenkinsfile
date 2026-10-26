@@ -68,7 +68,12 @@ pipeline {
                 sh '''
                     sed -i "s|image: .*|image: ${DOCKER_IMAGE}:${IMAGE_TAG}|" deployment-dev.yaml
 
+                    echo "=== Recreating development deployment ==="
+                    kubectl delete deployment dev-deployment \
+                      --ignore-not-found=true
+
                     kubectl apply -f deployment-dev.yaml
+
                     kubectl rollout status deployment/dev-deployment \
                       --timeout=180s
                 '''
