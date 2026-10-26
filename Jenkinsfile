@@ -63,6 +63,14 @@ pipeline {
             }
         }
 
+        stage('Inspect Dev Services') {
+            steps {
+                sh 'kubectl get services -o wide'
+                sh 'kubectl get ingress -o wide'
+                sh 'kubectl get pods -o wide'
+            }
+        }
+
         stage('Run Acceptance Tests') {
             steps {
                 script {
@@ -138,3 +146,4 @@ pipeline {
         }
     }
 }
+
