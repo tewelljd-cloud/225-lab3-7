@@ -87,6 +87,12 @@ pipeline {
                     echo "=== Services ==="
                     kubectl get services
 
+                    echo "=== dev-service endpoints ==="
+                    kubectl get endpoints dev-service -o wide
+
+                    echo "=== pods and labels ==="
+                    kubectl get pods --show-labels -o wide
+
                     echo "=== Ingress ==="
                     kubectl get ingress
                 '''
