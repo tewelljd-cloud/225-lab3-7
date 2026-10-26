@@ -2,147 +2,175 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_CREDENTIALS_ID = 'roseaw-dockerhub'
         DOCKER_IMAGE = 'cithit/tewelljd'
-        IMAGE_TAG = "build-${BUILD_NUMBER}"
+        DOCKER_CREDENTIALS_ID = 'roseaw-dockerhub'
         GITHUB_URL = 'https://github.com/tewelljd-cloud/225-lab3-7.git'
         KUBECONFIG = credentials('tewelljd-fl26')
+        IMAGE_TAG = "build-${BUILD_NUMBER}"
+        TARGET_URL = 'http://10.48.229.171'
     }
 
     stages {
         stage('Checkout') {
             steps {
-                cleanWs()
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: '*/main']],
-                    userRemoteConfigs: [[url: "${GITHUB_URL}"]]
-                ])
+                git branch: 'main', url: "${GITHUB_URL}"
             }
         }
 
         stage('Lint HTML') {
             steps {
-                sh 'npm install htmlhint --no-save'
-                sh 'npx htmlhint *.html'
+                sh '''
+                    docker run --rm \
+                      -v "$WORKSPACE:/work" \
+                      -w /work \
+                      node:alpine \
+                      sh -c "npx --yes html-validate index.html"
+                '''
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                script {
-                    docker.build(
-                        "${DOCKER_IMAGE}:${IMAGE_TAG}",
-                        "-f Dockerfile.build ."
-                    )
-                }
+                sh '''
+                    docker build \
+                      -f Dockerfile.build \
+                      -t ${DOCKER_IMAGE}:${IMAGE_TAG} \
+                      -t ${DOCKER_IMAGE}:latest \
+                      .
+                '''
             }
         }
 
         stage('Push Docker Image') {
             steps {
-                script {
-                    docker.withRegistry(
-                        'https://index.docker.io/v1/',
-                        "${DOCKER_CREDENTIALS_ID}"
-                    ) {
-                        docker.image("${DOCKER_IMAGE}:${IMAGE_TAG}").push()
-                    }
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${DOCKER_CREDENTIALS_ID}",
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )
+                ]) {
+                    sh '''
+                        echo "$DOCKER_PASS" | docker login \
+                          -u "$DOCKER_USER" --password-stdin
+
+                        docker push ${DOCKER_IMAGE}:${IMAGE_TAG}
+                        docker push ${DOCKER_IMAGE}:latest
+
+                        docker logout
+                    '''
                 }
             }
         }
 
         stage('Deploy to Dev Environment') {
             steps {
-                script {
-                    sh """
-                        sed -i 's|${DOCKER_IMAGE}:latest|${DOCKER_IMAGE}:${IMAGE_TAG}|' deployment-dev.yaml
-                        kubectl apply -f deployment-dev.yaml
-                    """
-                }
+                sh '''
+                    sed -i "s|image: .*|image: ${DOCKER_IMAGE}:${IMAGE_TAG}|" deployment-dev.yaml
+
+                    kubectl apply -f deployment-dev.yaml
+                    kubectl rollout status deployment/dev-deployment \
+                      --timeout=180s
+                '''
             }
         }
 
         stage('Inspect Dev Services') {
             steps {
-                sh 'kubectl get services -o wide'
-                sh 'kubectl get ingress -o wide'
-                sh 'kubectl get pods -o wide'
+                sh '''
+                    echo "=== Deployments ==="
+                    kubectl get deployments
+
+                    echo "=== Pods ==="
+                    kubectl get pods -o wide
+
+                    echo "=== Services ==="
+                    kubectl get services
+
+                    echo "=== Ingress ==="
+                    kubectl get ingress
+                '''
             }
         }
 
         stage('Run Acceptance Tests') {
             steps {
-                script {
-                    sh 'docker rm -f qa-tests || true'
-                    sh 'docker build -t qa-tests -f Dockerfile.test .'
-                    sh 'docker run --rm qa-tests'
-                }
+                sh '''
+                    docker build \
+                      -f Dockerfile.test \
+                      -t lab3-7-acceptance-tests \
+                      .
+
+                    docker run --rm \
+                      --network host \
+                      -e TARGET_URL=${TARGET_URL} \
+                      lab3-7-acceptance-tests
+                '''
             }
         }
 
         stage('Run Security Checks') {
             steps {
-                sh 'docker pull public.ecr.aws/portswigger/dastardly:latest'
                 sh '''
+                    docker pull public.ecr.aws/portswigger/dastardly:latest
+
                     docker run --user $(id -u) \
-                    -v ${WORKSPACE}:${WORKSPACE}:rw \
-                    -e BURP_START_URL=http://10.48.229.158 \
-                    -e BURP_REPORT_FILE_PATH=${WORKSPACE}/dastardly-report.xml \
-                    public.ecr.aws/portswigger/dastardly:latest
+                      -v "${WORKSPACE}:${WORKSPACE}:rw" \
+                      -e BURP_START_URL=${TARGET_URL} \
+                      -e BURP_REPORT_FILE_PATH=${WORKSPACE}/dastardly-report.xml \
+                      public.ecr.aws/portswigger/dastardly:latest
                 '''
             }
         }
 
         stage('Deploy to Prod Environment') {
             steps {
-                script {
-                    sh """
-                        sed -i 's|${DOCKER_IMAGE}:latest|${DOCKER_IMAGE}:${IMAGE_TAG}|' deployment-prod.yaml
-                        kubectl apply -f deployment-prod.yaml
-                    """
-                }
+                sh '''
+                    sed -i "s|image: .*|image: ${DOCKER_IMAGE}:${IMAGE_TAG}|" deployment-prod.yaml
+
+                    kubectl apply -f deployment-prod.yaml
+                '''
             }
         }
 
         stage('Check Kubernetes Cluster') {
             steps {
-                script {
-                    sh 'kubectl get pods'
-                    sh 'kubectl get services'
-                    sh 'kubectl get deployments'
-                    sh 'kubectl get ingress'
-                }
+                sh '''
+                    echo "=== Nodes ==="
+                    kubectl get nodes
+
+                    echo "=== All Pods ==="
+                    kubectl get pods -A
+
+                    echo "=== All Services ==="
+                    kubectl get services -A
+
+                    echo "=== Deployments ==="
+                    kubectl get deployments
+                '''
             }
         }
     }
 
     post {
         always {
-            junit testResults: 'dastardly-report.xml',
-                  allowEmptyResults: true,
-                  skipPublishingChecks: true
+            junit testResults: '**/test-results.xml',
+                  allowEmptyResults: true
+
+            archiveArtifacts artifacts: 'dastardly-report.xml',
+                             allowEmptyArchive: true
         }
 
         success {
-            slackSend(
-                color: 'good',
-                message: "Build Completed: ${env.JOB_NAME} ${env.BUILD_NUMBER}"
-            )
+            echo 'Lab 3.7 pipeline completed successfully.'
         }
 
         unstable {
-            slackSend(
-                color: 'warning',
-                message: "Build Unstable: ${env.JOB_NAME} ${env.BUILD_NUMBER}"
-            )
+            echo 'The pipeline is unstable. Review the test and security reports.'
         }
 
         failure {
-            slackSend(
-                color: 'danger',
-                message: "Build Failed: ${env.JOB_NAME} ${env.BUILD_NUMBER}"
-            )
+            echo 'The pipeline failed. Review Console Output for the failing stage.'
         }
     }
 }
