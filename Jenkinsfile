@@ -2,63 +2,60 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE = 'cithit/tewelljd'
         DOCKER_CREDENTIALS_ID = 'roseaw-dockerhub'
+        DOCKER_IMAGE = 'cithit/tewelljd'
+        IMAGE_TAG = "build-${BUILD_NUMBER}"
         GITHUB_URL = 'https://github.com/tewelljd-cloud/225-lab3-7.git'
         KUBECONFIG = credentials('tewelljd-fl26')
-        IMAGE_TAG = "build-${BUILD_NUMBER}"
         TARGET_URL = 'http://10.48.229.171'
     }
 
     stages {
         stage('Checkout') {
             steps {
-                git branch: 'main', url: "${GITHUB_URL}"
+                cleanWs()
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/main']],
+                    userRemoteConfigs: [[url: "${GITHUB_URL}"]]
+                ])
             }
         }
 
         stage('Lint HTML') {
             steps {
-                sh '''
-                    docker run --rm \
-                      -v "$WORKSPACE:/work" \
-                      -w /work \
-                      node:alpine \
-                      sh -c "npx --yes html-validate index.html"
-                '''
+                sh 'npm install htmlhint --save-dev'
+                sh 'npx htmlhint *.html'
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                sh '''
-                    docker build \
-                      -f Dockerfile.build \
-                      -t ${DOCKER_IMAGE}:${IMAGE_TAG} \
-                      -t ${DOCKER_IMAGE}:latest \
-                      .
-                '''
+                script {
+                    docker.withRegistry(
+                        'https://registry-1.docker.io',
+                        "${DOCKER_CREDENTIALS_ID}"
+                    ) {
+                        docker.build(
+                            "${DOCKER_IMAGE}:${IMAGE_TAG}",
+                            "-f Dockerfile.build ."
+                        )
+                    }
+                }
             }
         }
 
         stage('Push Docker Image') {
             steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: "${DOCKER_CREDENTIALS_ID}",
-                        usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_PASS'
-                    )
-                ]) {
-                    sh '''
-                        echo "$DOCKER_PASS" | docker login \
-                          -u "$DOCKER_USER" --password-stdin
-
-                        docker push ${DOCKER_IMAGE}:${IMAGE_TAG}
-                        docker push ${DOCKER_IMAGE}:latest
-
-                        docker logout
-                    '''
+                script {
+                    docker.withRegistry(
+                        'https://index.docker.io/v1/',
+                        "${DOCKER_CREDENTIALS_ID}"
+                    ) {
+                        docker.image(
+                            "${DOCKER_IMAGE}:${IMAGE_TAG}"
+                        ).push()
+                    }
                 }
             }
         }
@@ -67,69 +64,32 @@ pipeline {
             steps {
                 sh '''
                     sed -i "s|image: .*|image: ${DOCKER_IMAGE}:${IMAGE_TAG}|" deployment-dev.yaml
-
-                    echo "=== Recreating development deployment ==="
-                    kubectl delete deployment dev-deployment \
-                      --ignore-not-found=true
-
                     kubectl apply -f deployment-dev.yaml
-
-                    kubectl rollout status deployment/dev-deployment \
-                      --timeout=180s
-                '''
-            }
-        }
-
-        stage('Inspect Dev Services') {
-            steps {
-                sh '''
-                    echo "=== Deployments ==="
-                    kubectl get deployments
-
-                    echo "=== Pods ==="
-                    kubectl get pods -o wide
-
-                    echo "=== Services ==="
-                    kubectl get services
-
-                    echo "=== dev-service endpoints ==="
-                    kubectl get endpoints dev-service -o wide
-
-                    echo "=== pods and labels ==="
-                    kubectl get pods --show-labels -o wide
-
-                    echo "=== Ingress ==="
-                    kubectl get ingress
+                    kubectl rollout status deployment/dev-deployment --timeout=180s
                 '''
             }
         }
 
         stage('Run Acceptance Tests') {
             steps {
-                sh '''
-                    docker build \
-                      -f Dockerfile.test \
-                      -t lab3-7-acceptance-tests \
-                      .
-
-                    docker run --rm \
-                      --network host \
-                      -e TARGET_URL=${TARGET_URL} \
-                      lab3-7-acceptance-tests
-                '''
+                script {
+                    sh 'docker stop qa-tests || true'
+                    sh 'docker rm qa-tests || true'
+                    sh 'docker build -t qa-tests -f Dockerfile.test .'
+                    sh 'docker run --rm qa-tests'
+                }
             }
         }
 
         stage('Run Security Checks') {
             steps {
+                sh 'docker pull public.ecr.aws/portswigger/dastardly:latest'
                 sh '''
-                    docker pull public.ecr.aws/portswigger/dastardly:latest
-
                     docker run --user $(id -u) \
-                      -v "${WORKSPACE}:${WORKSPACE}:rw" \
-                      -e BURP_START_URL=${TARGET_URL} \
-                      -e BURP_REPORT_FILE_PATH=${WORKSPACE}/dastardly-report.xml \
-                      public.ecr.aws/portswigger/dastardly:latest
+                        -v ${WORKSPACE}:${WORKSPACE}:rw \
+                        -e BURP_START_URL=${TARGET_URL} \
+                        -e BURP_REPORT_FILE_PATH=${WORKSPACE}/dastardly-report.xml \
+                        public.ecr.aws/portswigger/dastardly:latest
                 '''
             }
         }
@@ -139,49 +99,50 @@ pipeline {
                 sh '''
                     sed -i "s|image: .*|image: ${DOCKER_IMAGE}:${IMAGE_TAG}|" deployment-prod.yaml
 
+                    echo "=== Recreating production deployment ==="
+                    kubectl delete deployment prod-deployment --ignore-not-found=true
                     kubectl apply -f deployment-prod.yaml
+                    kubectl rollout status deployment/prod-deployment --timeout=180s
                 '''
             }
         }
 
         stage('Check Kubernetes Cluster') {
             steps {
-                sh '''
-                    echo "=== Nodes ==="
-                    kubectl get nodes
-
-                    echo "=== All Pods ==="
-                    kubectl get pods -A
-
-                    echo "=== All Services ==="
-                    kubectl get services -A
-
-                    echo "=== Deployments ==="
-                    kubectl get deployments
-                '''
+                sh 'kubectl get all'
             }
         }
     }
 
     post {
         always {
-            junit testResults: '**/test-results.xml',
-                  allowEmptyResults: true
-
             archiveArtifacts artifacts: 'dastardly-report.xml',
                              allowEmptyArchive: true
+
+            junit testResults: 'dastardly-report.xml',
+                  skipPublishingChecks: true,
+                  allowEmptyResults: true
         }
 
         success {
-            echo 'Lab 3.7 pipeline completed successfully.'
+            slackSend(
+                color: 'good',
+                message: "Build Completed: ${env.JOB_NAME} ${env.BUILD_NUMBER}"
+            )
         }
 
         unstable {
-            echo 'The pipeline is unstable. Review the test and security reports.'
+            slackSend(
+                color: 'warning',
+                message: "Build Unstable: ${env.JOB_NAME} ${env.BUILD_NUMBER}"
+            )
         }
 
         failure {
-            echo 'The pipeline failed. Review Console Output for the failing stage.'
+            slackSend(
+                color: 'danger',
+                message: "Build Failed: ${env.JOB_NAME} ${env.BUILD_NUMBER}"
+            )
         }
     }
 }
